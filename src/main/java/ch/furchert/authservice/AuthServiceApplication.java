@@ -1,4 +1,4 @@
-package ch.furchert.auth_service;
+package ch.furchert.authservice;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
