@@ -1,210 +1,214 @@
 # Auth Service
 
 ## Overview
-The Auth Service handles **authentication** and **authorization** in the IoT application. It issues and validates **JWT tokens** and delegates any user profile management to the **User Management Service**.
+The Auth Service now leverages **Spring Authorization Server**, implementing a **standards-based OAuth 2.1** flow. It handles **authentication** and **authorization** for the IoT application, issuing and validating **JWT tokens**. User profiles and passwords remain in the **User Management Service** (UMS); the Auth Service contacts UMS (optionally) to verify credentials or load user details.
+
+This setup also supports **machine-to-machine** (client credentials) authentication (e.g., for a hardware device).
 
 ---
 
 ## Responsibilities
-1. **Token Issuance & Validation**
-    - Issue JWTs upon successful user login.
-    - Validate incoming JWTs for other microservices.
 
-2. **Authorization Rules**
-    - Maintain a mapping of roles (`admin`, `user`) to specific permissions.
-    - Provide a secure way for services (e.g., Device Management Service) to verify a user’s or device’s authorization levels.
+1. **OAuth 2.1 Token Issuance**
+    - Issues tokens (access/refresh) for both user-based (Authorization Code, Password) and machine-based (Client Credentials) grants.
+    - Integrates with a PostgreSQL database for persistent storage of registered clients and active authorizations.
 
-3. **Endpoints**
-    - `/login`: Accepts credentials, issues JWT.
-    - `/validate`: Validates JWT for other services (internal endpoint).
-    - `/refresh`: Issues a new JWT if the current one is about to expire.
-    - **Best-Practice Suggestion:** For password resets and changes, the Auth Service can coordinate with the User Management Service. Implementation details vary depending on your security policies.
+2. **Token Validation**
+    - Provides standard OAuth2 endpoints (e.g., `/oauth2/jwks`) for resource servers to validate JWT signatures.
+    - Other microservices validate tokens automatically if configured as **OAuth2 Resource Servers**.
+
+3. **Authorization Rules**
+    - Supports scoping and role-based logic (e.g., `iot.read`, `iot.write`) for device or user permissions.
+    - Delegates advanced user profile management and credential storage to the UMS.
+
+4. **Endpoints**
+    - Standard OAuth2 endpoints:
+        - `/oauth2/authorize` (for interactive flows like Authorization Code)
+        - `/oauth2/token` (for requesting and refreshing tokens)
+        - `/oauth2/jwks` (JSON Web Key Set for validating JWT signatures)
+        - `/oauth2/introspect` & `/oauth2/revoke` (optional)
+    - **Note**: Custom endpoints like `/login`, `/validate`, `/refresh` are no longer necessary with Spring Authorization Server.
 
 ---
 
 ## Proposed Architecture
 
 ### Textual Description
-1. **JWT Issuance**  
-   When the user logs in (via the Frontend), the Auth Service checks credentials (in collaboration with the User Management Service) and issues a signed JWT.
 
-2. **JWT Validation**  
-   Other services send the JWT to the Auth Service for validation or use a shared secret/public key approach to validate tokens independently.
+1. **OAuth2 Authorization Server**
+    - Defines registered clients (e.g., `frontend-client`, `hardware-device`) and grants (authorization_code, client_credentials, refresh_token).
+    - Stores tokens and client configurations in **PostgreSQL** (`authdb` or a dedicated schema).
 
-3. **Scalable Design**  
-   Runs as a Spring Boot microservice, packaged in Docker. Can be deployed locally via Docker Compose or in production with K3s.
+2. **User Credentials**
+    - For user-based logins, the Auth Service calls the **User Management Service** to validate usernames and hashed passwords, or it configures a custom `UserDetailsService` that fetches user data from UMS.
+
+3. **Scalable & Standards-Based**
+    - Runs as a Spring Boot microservice in Docker/Kubernetes.
+    - Other services become **OAuth2 Resource Servers**, fetching this Auth Service’s JWKS for token validation.
 
 ```plantuml
 @startuml
 
 rectangle "Auth Service" as AUTH {
-    interface "POST /login" as LOGIN
-    interface "POST /validate" as VALIDATE
-    interface "POST /refresh" as REFRESH
+    note top of AUTH: Spring Authorization Server
+    interface "/oauth2/token" as OAUTH_TOKEN
+    interface "/oauth2/authorize" as OAUTH_AUTHZ
+    interface "/oauth2/jwks" as OAUTH_JWKS
 }
 
 rectangle "User Management Service" as UMS {
-    interface "GET /users/{id}" as GET_USER
+    note top of UMS: Manages user data
+    interface "/users/{username}" as UMS_GETUSER
 }
 
 rectangle "Device Management Service" as DMS
 rectangle "Data Processing Service" as DPS
 rectangle "Frontend" as FE
+rectangle "Hardware Device" as HW
 
-FE -> AUTH: [POST /login] Credentials
-AUTH -> UMS: [GET /users/{id}] Validate credentials
-UMS --> AUTH: Valid user or invalid user
-AUTH --> FE: JWT issued or error
+FE -> AUTH: [Authorization Code Flow] /oauth2/authorize
+AUTH -> UMS: [Validate user credentials if needed]
+UMS --> AUTH: "User valid" or "Invalid"
 
-FE -> AUTH: [POST /refresh] Refresh token
-AUTH --> FE: New JWT
+HW -> AUTH: [POST /oauth2/token] client_credentials
+AUTH --> HW: Access token for hardware (JWT)
 
-DMS -> AUTH: [POST /validate] Validate JWT
-AUTH --> DMS: Valid / invalid token
-DPS -> AUTH: [POST /validate] Validate JWT
-AUTH --> DPS: Valid / invalid token
+DMS -> AUTH: [Check jwks endpoint or introspect] 
+AUTH --> DMS: Public key (JWKS) or introspection response
 
 @enduml
 ```
 
-### Class Diagram
+### OAuth2 Flow Explanation
+
+- **Interactive Users (Frontend)**:
+    1. The user tries to log in via the frontend.
+    2. The frontend redirects to `/oauth2/authorize` in the Auth Service.
+    3. The Auth Service checks user credentials (possibly via UMS).
+    4. On success, the Auth Service issues an **authorization code**, which the frontend exchanges for an **access token** at `/oauth2/token`.
+    5. The frontend uses that access token to call microservices.
+
+- **Hardware Device (Client Credentials)**:
+    1. The device directly calls `/oauth2/token` with its `client_id` and `client_secret`.
+    2. The Auth Service returns an **access token** with scopes like `iot.read`/`iot.write`.
+    3. The hardware device can now call secure endpoints in other services using that token.
+
+---
+
+## Updated Class Diagram
 
 ```plantuml
 @startuml
-title Auth Service - Class Diagram
+title Auth Service - Class Diagram (Spring Authorization Server)
 
-interface AuthService {
-  + login(credentials: LoginRequest): TokenResponse
-  + refreshToken(refreshToken: String): TokenResponse
-  + validateToken(token: String): boolean
+class AuthorizationServerConfig {
+  + SecurityFilterChain authServerSecurityFilterChain(HttpSecurity)
+  + AuthorizationServerSettings authorizationServerSettings()
+  + RegisteredClientRepository registeredClientRepository(...)
+  + OAuth2AuthorizationService authorizationService(...)
 }
 
-class AuthServiceImpl {
-  - jwtTokenProvider: JwtTokenProvider
-  - refreshTokenRepository: RefreshTokenRepository
-  + login(credentials: LoginRequest): TokenResponse
-  + refreshToken(refreshToken: String): TokenResponse
-  + validateToken(token: String): boolean
+class DefaultSecurityConfig {
+  + SecurityFilterChain defaultSecurityFilterChain(HttpSecurity)
 }
 
-class AuthController {
-  - authService: AuthService
-  + login(credentials: LoginRequest): ResponseEntity<TokenResponse>
-  + refreshToken(refreshToken: String): ResponseEntity<TokenResponse>
-  + validateToken(token: String): ResponseEntity<Boolean>
-}
-
-class JwtTokenProvider {
-  - secretKey: String
-  - validityInMilliseconds: long
-  + generateToken(username: String): String
-  + validateToken(token: String): boolean
-  + getUsername(token: String): String
-}
-
-class SecurityConfig {
-  + filterChain(http: HttpSecurity): SecurityFilterChain
+class UserDetailsServiceConfig {
+  + userDetailsService(): UserDetailsService
   + passwordEncoder(): PasswordEncoder
 }
 
-class LoginRequest {
-  + username: String
-  + password: String
+class UserManagementClient {
+  + getUserByUsername(username: String): Optional<UserDto>
 }
 
-class TokenResponse {
-  + accessToken: String
-  + refreshToken: String
-  + tokenType: String
-  + expiresIn: long
-}
-
-' Optional Entity for storing refresh tokens locally
-class RefreshToken {
+class UserDto {
   + id: Long
-  + token: String
   + username: String
-  + expiry: long
+  + passwordHash: String
+  + role: String
 }
 
-' Optional Repository for managing stored refresh tokens
-class RefreshTokenRepository {
-  + save(refreshToken: RefreshToken): RefreshToken
-  + findByToken(token: String): RefreshToken
-  + deleteByToken(token: String): void
-}
+' DB / Repositories for OAuth data
+class JdbcRegisteredClientRepository
+class JdbcOAuth2AuthorizationService
 
-' Relationships
-AuthController --> AuthService : uses
-AuthService <|.. AuthServiceImpl
-AuthServiceImpl --> JwtTokenProvider : uses
-AuthServiceImpl --> RefreshTokenRepository : (optional) uses
-AuthServiceImpl --> TokenResponse : returns
-AuthServiceImpl --> LoginRequest : consumes
+AuthorizationServerConfig --> JdbcRegisteredClientRepository : uses
+AuthorizationServerConfig --> JdbcOAuth2AuthorizationService : uses
+AuthorizationServerConfig --> AuthorizationServerSettings : returns
+
+DefaultSecurityConfig --> SecurityFilterChain : configures
+UserDetailsServiceConfig --> UserManagementClient : uses
+UserDetailsServiceConfig --> UserDetailsService : returns
+UserManagementClient --> UserDto : returns
+
 @enduml
 ```
 
 ### Diagram Explanation
 
-1. **AuthService** (Interface)
-    - Defines the core contract for login, token refresh, and validation.
+1. **AuthorizationServerConfig**
+    - Main config for Spring Authorization Server.
+    - Sets up endpoints (`/oauth2/token`, `/oauth2/authorize`, `/oauth2/jwks`), client definitions, token storage in PostgreSQL.
 
-2. **AuthServiceImpl** (Implementation)
-    - Implements the `AuthService` methods.
-    - Uses `JwtTokenProvider` to generate/validate JWTs.
-    - Optionally uses `RefreshTokenRepository` to persist/lookup refresh tokens.
+2. **DefaultSecurityConfig**
+    - Basic Spring Security chain for any non-OAuth endpoints or default login pages.
 
-3. **AuthController**
-    - Exposes REST endpoints (`/login`, `/refresh`, `/validate`).
-    - Delegates logic to `AuthService`.
+3. **UserDetailsServiceConfig**
+    - Optionally defines how user credentials are fetched (via `UserManagementClient`) if you support password-based or user-based flows.
 
-4. **JwtTokenProvider**
-    - Creates and validates JWT tokens using a secret key, handles expiration times, and extracts the username from the token.
+4. **UserManagementClient**
+    - A simple class that calls the **User Management Service** (UMS) to retrieve user details.
 
-5. **SecurityConfig**
-    - Configures Spring Security HTTP rules and a `PasswordEncoder`.
-
-6. **LoginRequest** & **TokenResponse**
-    - **DTOs** for incoming/outgoing payloads: credentials in, JWT + refresh token out.
-
-7. **RefreshToken** & **RefreshTokenRepository** (Optional)
-    - **Entity** and **Repository** for storing refresh tokens in a local database.
-    - If your design relies entirely on the User Management Service for credentials and doesn’t store refresh tokens locally, you can remove these.
+5. **JdbcRegisteredClientRepository** / **JdbcOAuth2AuthorizationService**
+    - Classes from Spring Authorization Server that store **client registrations** and **OAuth2 authorizations** in PostgreSQL.
 
 ---
 
 ## Interfaces with Other Services
 
 1. **User Management Service**
-    - **Type**: Internal REST API
-    - **Endpoints**: `GET /users/{id}` for credential checks or other user details.
+    - **Purpose**: Provides user data and hashed passwords.
+    - **Endpoints**: `/users/{username}`, or a custom route, for verifying credentials.
 
-2. **Device Management Service**
-    - **Type**: REST API calls for validating tokens.
+2. **Device Management & Data Processing Services**
+    - **Type**: OAuth2 **Resource Servers**.
+    - Rely on Auth Service’s JWKS or issuer URI for token validation.
 
-3. **Data Processing Service**
-    - **Type**: REST API calls for validating tokens.
+3. **Frontend**
+    - Uses standard OAuth2 flows (e.g., **Authorization Code**).
 
-4. **Frontend**
-    - **Type**: REST (login, token refresh).
+4. **Hardware Device**
+    - Uses **Client Credentials** flow to obtain tokens without a user login.
 
 ---
 
 ## Security & Maintenance
-- **Best-Practice Suggestion**: Consider storing **client secrets** and **tokens** in a secure vault (e.g., HashiCorp Vault).
-- **Best-Practice Suggestion**: Rotate JWT signing keys periodically for better security.
-- **Auto-Scaling**: If user load spikes, replicate the Auth Service to handle more concurrent logins.
+
+- **Use PostgreSQL**
+    - Credentials: `jdbc:postgresql://postgres:5432/authdb` (or a separate schema in the main `iotdb`).
+    - Store and retrieve **Registered Clients** and **OAuth tokens**.
+
+- **Rotate Client Secrets**
+    - If your hardware device has a long-lived client secret, consider a rotation strategy.
+
+- **User Credential Validation**
+    - For user-based flows, integrate a `UserDetailsService` or REST calls to the UMS. Keep password hashing consistent between services.
+
+- **Scaling**
+    - Run multiple Auth Service instances (stateless tokens) behind a load balancer. All instances share the same `authdb` so token revocations and approvals stay in sync.
 
 ---
 
 ## Project Information
+
 - **Programming Language**: Java (version 21)
 - **Framework**: Spring Boot 3.4.1
 - **Build Tool**: Maven
 - **Dependencies**:
     - Spring Boot Starters (Actuator, Data JPA, Security, Validation, Web, Mail)
+    - **Spring Boot Starter OAuth2 Authorization Server** (Key for OAuth 2.1 flows)
     - Lombok
-    - PostgreSQL Driver
+    - PostgreSQL Driver (for storing OAuth client + token data)
     - Micrometer (InfluxDB)
     - Spring Boot Docker Compose
     - Spring Boot DevTools (for development)
@@ -216,15 +220,51 @@ AuthServiceImpl --> LoginRequest : consumes
 
 ---
 
-## Endpoints Summary
+## Endpoints Summary (OAuth2 Focus)
 
-- **POST /auth/login**  
-  Accepts credentials (username, password) and returns a signed JWT (and optional refresh token).
+> These endpoints are **standard** to Spring Authorization Server.
 
-- **POST /auth/refresh**  
-  Accepts a valid refresh token to issue a new access token.
+- **`GET /oauth2/authorize`**
+    - Used by clients to start an Authorization Code flow.
 
-- **POST /auth/validate**  
-  Validates the provided JWT; returns a boolean or status indicating token validity. (Typically used by other services internally.)
+- **`POST /oauth2/token`**
+    - Exchanges auth codes for tokens.
+    - Supports **client_credentials** and **refresh_token** flows too.
+
+- **`GET /oauth2/jwks`**
+    - Publishes the public keys used to sign JWTs, so resource servers can validate tokens.
+
+- **`POST /oauth2/introspect`** (Optional)
+    - Allows resource servers to validate tokens if they don’t directly parse JWT.
+
+- **`POST /oauth2/revoke`** (Optional)
+    - Allows clients to revoke tokens.
+
+---
+
+## How the OAuth Stuff Works
+
+1. **Registered Clients**
+    - Defined in `AuthorizationServerConfig` (in-memory) or stored in PostgreSQL via `JdbcRegisteredClientRepository`.
+    - Each client has a `clientId`, `clientSecret`, allowed grant types (e.g., `authorization_code`, `client_credentials`), and assigned scopes.
+
+2. **Token Issuance**
+    - When a client calls `/oauth2/token`, the Auth Server verifies credentials and issues an **access token** (and optionally a refresh token).
+    - Access tokens are **JWTs**, signed by a private key or a symmetric secret.
+
+3. **Token Validation**
+    - Resource servers can fetch the Auth Server’s **JSON Web Key Set** (`/oauth2/jwks`) to validate the JWT signature.
+    - Alternatively, they can use the `issuer-uri` property to auto-discover the keys.
+
+4. **Refresh Tokens**
+    - For flows that allow refresh (e.g., authorization_code, password), the Auth Server persists the refresh token in the DB.
+    - Clients can use this token to request a new access token when the old one expires.
+
+5. **Integration with UMS**
+    - If a user-based flow requires verifying username and password, the Auth Service references the UMS (via a `UserManagementClient`) to confirm hashed passwords, roles, etc.
+
+6. **Machine Clients** (Hardware Device)
+    - If you register a hardware device with `client_credentials` flow, it sends its `client_id` and `client_secret` to `/oauth2/token` and receives a token with predefined scopes (e.g., `iot.read`, `iot.write`).
+    - This token can be used for non-user-bound IoT operations.
 
 ---
