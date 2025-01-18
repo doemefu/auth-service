@@ -15,7 +15,13 @@ public class DefaultSecurityConfig {
                 .authorizeHttpRequests(authorize -> authorize
                         // Open the Authorization Server's endpoints.
                         // (They'll be handled by AuthorizationServerConfig anyway.)
-                        .requestMatchers("/oauth2/**").permitAll()
+                        .requestMatchers(
+                                "/oauth2/**",
+                                "/actuator/**",
+                                "/swagger-ui/**",
+                                "/api-docs/**",
+                                "/swagger-ui.html")
+                        .permitAll() // Adjust access as needed
                         .anyRequest().authenticated()
                 )
                 // We can allow formLogin or HTTP Basic, etc.

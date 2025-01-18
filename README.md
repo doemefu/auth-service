@@ -1,9 +1,10 @@
 # Auth Service
 
 ## Overview
+
 The Auth Service now leverages **Spring Authorization Server**, implementing a **standards-based OAuth 2.1** flow. It handles **authentication** and **authorization** for the IoT application, issuing and validating **JWT tokens**. User profiles and passwords remain in the **User Management Service** (UMS); the Auth Service contacts UMS (optionally) to verify credentials or load user details.
 
-This setup also supports **machine-to-machine** (client credentials) authentication (e.g., for a hardware device).
+This setup also supports **machine-to-machine** (client credentials) authentication (e.g., for a hardware device). The **PostgreSQL** backend (`authdb`) stores registered OAuth2 clients (e.g., “frontend-client”) and token-related data.
 
 ---
 
@@ -11,7 +12,7 @@ This setup also supports **machine-to-machine** (client credentials) authenticat
 
 1. **OAuth 2.1 Token Issuance**
     - Issues tokens (access/refresh) for both user-based (Authorization Code, Password) and machine-based (Client Credentials) grants.
-    - Integrates with a PostgreSQL database for persistent storage of registered clients and active authorizations.
+    - Integrates with a PostgreSQL database for persistent storage of registered clients and active authorizations (including device codes, user codes, etc.).
 
 2. **Token Validation**
     - Provides standard OAuth2 endpoints (e.g., `/oauth2/jwks`) for resource servers to validate JWT signatures.
@@ -22,7 +23,7 @@ This setup also supports **machine-to-machine** (client credentials) authenticat
     - Delegates advanced user profile management and credential storage to the UMS.
 
 4. **Endpoints**
-    - Standard OAuth2 endpoints:
+    - **Standard OAuth2 endpoints** provided by Spring Authorization Server:
         - `/oauth2/authorize` (for interactive flows like Authorization Code)
         - `/oauth2/token` (for requesting and refreshing tokens)
         - `/oauth2/jwks` (JSON Web Key Set for validating JWT signatures)
@@ -37,7 +38,7 @@ This setup also supports **machine-to-machine** (client credentials) authenticat
 
 1. **OAuth2 Authorization Server**
     - Defines registered clients (e.g., `frontend-client`, `hardware-device`) and grants (authorization_code, client_credentials, refresh_token).
-    - Stores tokens and client configurations in **PostgreSQL** (`authdb` or a dedicated schema).
+    - **Stores tokens and client configurations** in **PostgreSQL** (`authdb` or a dedicated schema).
 
 2. **User Credentials**
     - For user-based logins, the Auth Service calls the **User Management Service** to validate usernames and hashed passwords, or it configures a custom `UserDetailsService` that fetches user data from UMS.
@@ -73,7 +74,7 @@ UMS --> AUTH: "User valid" or "Invalid"
 HW -> AUTH: [POST /oauth2/token] client_credentials
 AUTH --> HW: Access token for hardware (JWT)
 
-DMS -> AUTH: [Check jwks endpoint or introspect] 
+DMS -> AUTH: [Check jwks endpoint or introspect]
 AUTH --> DMS: Public key (JWKS) or introspection response
 
 @enduml
@@ -148,7 +149,7 @@ UserManagementClient --> UserDto : returns
 
 1. **AuthorizationServerConfig**
     - Main config for Spring Authorization Server.
-    - Sets up endpoints (`/oauth2/token`, `/oauth2/authorize`, `/oauth2/jwks`), client definitions, token storage in PostgreSQL.
+    - Sets up endpoints (`/oauth2/token`, `/oauth2/authorize`, `/oauth2/jwks`), **client definitions**, token storage in PostgreSQL, etc.
 
 2. **DefaultSecurityConfig**
     - Basic Spring Security chain for any non-OAuth endpoints or default login pages.
@@ -157,10 +158,11 @@ UserManagementClient --> UserDto : returns
     - Optionally defines how user credentials are fetched (via `UserManagementClient`) if you support password-based or user-based flows.
 
 4. **UserManagementClient**
-    - A simple class that calls the **User Management Service** (UMS) to retrieve user details.
+    - A simple class that calls the **User Management Service** (UMS) to retrieve user details (username, password hash, roles).
 
 5. **JdbcRegisteredClientRepository** / **JdbcOAuth2AuthorizationService**
     - Classes from Spring Authorization Server that store **client registrations** and **OAuth2 authorizations** in PostgreSQL.
+    - Supports advanced features like device codes, user codes, `post_logout_redirect_uris`, etc.
 
 ---
 
@@ -184,9 +186,10 @@ UserManagementClient --> UserDto : returns
 
 ## Security & Maintenance
 
-- **Use PostgreSQL**
-    - Credentials: `jdbc:postgresql://postgres:5432/authdb` (or a separate schema in the main `iotdb`).
+- **PostgreSQL**
+    - Credentials: `jdbc:postgresql://postgres:5432/authdb`.
     - Store and retrieve **Registered Clients** and **OAuth tokens**.
+    - **Flyway** migrations to manage and version the schema.
 
 - **Rotate Client Secrets**
     - If your hardware device has a long-lived client secret, consider a rotation strategy.
